@@ -49,7 +49,7 @@ __m128i collapse_map[] = {
 };
 
 // store the topmost lane from src to dest, then permute src in [a,b,c,d] => [b,c,d,a] order (57 is the magic number for that)
-# define store_top_and_permute(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter]), src); _mm_permute_ps(src, 57);
+#define store_top_and_permute(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter]), src); src = _mm_permute_ps(src, 57);
 
 #define VECTOR_INCREMENT 4
 
@@ -235,15 +235,8 @@ void shard(item_t item) {
 		if (item.prefixes[item.j&mask]) {
 			continue;
 		}
-		bitpat_t t2;
-		t = t2 = int2bitpat(item.j,item.i);
+		t = int2bitpat(item.j,item.i);
 		mc = simd_test_for_match(t, matches);
-		// mc2 = test_for_match(t2, matches2);
-		// if (mc != mc2) {
-		// 	printf("mc=%i,%i matches=[%i,%i],2[%i,%i] i=%i j=%llu\n", mc, mc2, matches[0], matches[1], matches2[0], matches2[1], item.i, item.j);
-		// 	sleep(1);
-		// 	exit(0);
-		// }
 		if (mc == 2 && matches[0] >= item.i/2 && matches[1] == item.i && matches[0] >= matches[1]/2 && matches[0]*2 > matches[1]) {
 			bitpat2str(t, pbuff);
 			printf("%s [%i %i]\n", pbuff, matches[0], matches[1]);
@@ -291,7 +284,7 @@ int main() {
 	wq.size = 1024;
 	wq.p = wq.last = 0;
 	pthread_mutex_init(&(wq.mut), NULL);
-	for (i=10; i<=36; i += 2) {
+	for (i=10; i<=32; i += 2) {
 		wq.done = 0;
 		max = (uint64_t)1 << (i - 1);
 		prefixes = malloc((size_t) 1 << (i/2));
