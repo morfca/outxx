@@ -16,77 +16,7 @@ bitpat_t int2bitpat(uint64_t v, int l) {
 	return (bitpat_t){~0 >> (64 - l) & v, l};
 }
 
-#ifdef __SSE4_2__
-#include <immintrin.h>
-#include <emmintrin.h>
-#define m128_init32(c1, c2, c3, c4) {(uint64_t)c1 + ((uint64_t)c2 << 32), (uint64_t)c3 + ((uint64_t)c4 << 32)}
-#define m128_unpack32(x) (int[4]){x[0]&0xFFFFFFFF, x[0]>>32, x[1]&0xFFFFFFFF, x[1]>>32}
-#define m128_init64(c1, c2) {(uint64_t)c1, (uint64_t)c2}
-#define m128_unpack64(x) (uint64_t[2]){x[0], x[1]}
-
-__m128i offsets32 = m128_init32(0, 1, 2, 3);
-__m128i offsets64 = m128_init64(0, 1);
-__m128i xone32 = m128_init32(1,1,1,1);
-__m128i xone64 = m128_init64(1,1);
-
-uint8_t add_table[] = {0, 1, 1, 2};
-
-
-// # define store_top(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter], src);
-
-#define VECTOR_INCREMENT 2
-int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
-	__m128i xi, xmask, xa, xb, xresult, xmatches, xmaskshift, xnotmask;
-	__m128i xstore;
-	uint64_t mask;
-	uint32_t result_lanes;
-	int j, ret;
-	xi = _mm_set1_epi64x(i);
-	xstore = xi = _mm_add_epi64(xi, offsets64);
-	// printf("\n");
-	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
-	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
-	mask = UINT64_MAX << i;
-	xmask = _mm_insert_epi64(xmask, mask, 0);
-	mask = mask << 1;
-	xmask = _mm_insert_epi64(xmask, mask, 1);
-	xnotmask = _mm_set1_epi64x(UINT64_MAX);
-	xmask = _mm_andnot_si128(xmask, xnotmask);
-	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
-	// printf("xmask=[%llx, %llx]\n", xmask[0], xmask[1]);
-	xa = xb = _mm_set1_epi64x(p.pattern);
-	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
-	// mask out high bits on ya
-	xa = _mm_and_si128(xa, xmask);
-	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
-	// shift yb right by yi then mask out high bits
-	xb = _mm_srl_epi64(xb, xi);
-	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
-	xb = _mm_and_si128(xb, xmask);
-	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
-	// compare, then get result lane mask
-	xresult = _mm_cmpeq_epi64(xa, xb);
-	// printf("xresult=[%llx, %llx]\n", xresult[0], xresult[1]);
-	result_lanes = _mm_movemask_pd(xresult);
-	// printf("result_lanes=%i\n", result_lanes);
-	// we want to store the size of the bit patterns that result in euqals, so...
-	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
-	xstore = _mm_sll_epi64(xstore, xone64);
-	// printf("xstore=[%llx %llx]\n", xstore[0], xstore[1]);
-	// use pre-calculated permute map to shuffle our results to the leftmost lanes
-	j = mc;
-	xstore = _mm_shuffle_ps(xstore, xstore, 8);
-	// printf("xstore=[%x %x]\n", _mm_extract_epi32(xstore, 0), _mm_extract_epi32(xstore, 1));
-	switch(result_lanes) {
-		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
-		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);  //printf("shuffle\n");
-		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
-		default: break;
-	}
-	// printf("matches[]=[%x, %x], mc=%i, j - mc=%i\n", matches[0], matches[1], mc, j-mc);
-	return j - mc;
-}
-#elif __AVX2__
+#ifdef __AVX2__
 #include <immintrin.h>
 #define m128_init(c1, c2, c3, c4) {(uint64_t)c1 + ((uint64_t)c2 << 32), (uint64_t)c3 + ((uint64_t)c4 << 32)}
 #define m128_unpack(x) (int[4]){x[0]&0xFFFFFFFF, x[0]>>32, x[1]&0xFFFFFFFF, x[1]>>32}
@@ -166,6 +96,81 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
 		default: break;
 	}
 	return add_table[result_lanes];
+}
+#elif __SSE4_2__
+#include <immintrin.h>
+#include <emmintrin.h>
+#define m128_init32(c1, c2, c3, c4) {(uint64_t)c1 + ((uint64_t)c2 << 32), (uint64_t)c3 + ((uint64_t)c4 << 32)}
+#define m128_unpack32(x) (int[4]){x[0]&0xFFFFFFFF, x[0]>>32, x[1]&0xFFFFFFFF, x[1]>>32}
+#define m128_init64(c1, c2) {(uint64_t)c1, (uint64_t)c2}
+#define m128_unpack64(x) (uint64_t[2]){x[0], x[1]}
+
+__m128i offsets32 = m128_init32(0, 1, 2, 3);
+__m128i offsets64 = m128_init64(0, 1);
+__m128i xone32 = m128_init32(1,1,1,1);
+__m128i xone64 = m128_init64(1,1);
+
+uint8_t add_table[] = {0, 1, 1, 2};
+
+// # define store_top(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter], src);
+
+#define VECTOR_INCREMENT 2
+int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
+	__m128i xi, xmask, xa, xb, xresult, xmatches, xmaskshift, xnotmask;
+	__m128i xstore;
+	uint64_t mask, itemp;
+	uint32_t result_lanes;
+	int j, ret;
+	xi = _mm_set1_epi64x(i);
+	xstore = xi = _mm_add_epi64(xi, offsets64);
+	// printf("\n");
+	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
+	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
+	mask = UINT64_MAX << i;
+	xmask = _mm_insert_epi64(xmask, mask, 0);
+	mask = mask << 1;
+	xmask = _mm_insert_epi64(xmask, mask, 1);
+	xnotmask = _mm_set1_epi64x(UINT64_MAX);
+	xmask = _mm_andnot_si128(xmask, xnotmask);
+	// printf("\n");
+	// printf("p=%lx:%i\n", p.pattern, p.length);
+	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
+	// printf("xmask=[%llx, %llx]\n", xmask[0], xmask[1]);
+	xa = _mm_set1_epi64x(p.pattern);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// mask out high bits on xa
+	xa = _mm_and_si128(xa, xmask);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// shift xb right by xi then mask out high bits
+	itemp = p.pattern >> i;
+	xb = _mm_insert_epi64(xb, itemp, 0);
+	itemp = itemp >> 1;
+	xb = _mm_insert_epi64(xb, itemp, 1);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	xb = _mm_and_si128(xb, xmask);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// compare, then get result lane mask
+	xresult = _mm_cmpeq_epi64(xa, xb);
+	// printf("xresult=[%llx, %llx]\n", xresult[0], xresult[1]);
+	result_lanes = _mm_movemask_pd(xresult);
+	// printf("result_lanes=%i\n", result_lanes);
+	// we want to store the size of the bit patterns that result in euqals, so...
+	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
+	xstore = _mm_sll_epi64(xstore, xone64);
+	// printf("xstore=[%llx %llx]\n", xstore[0], xstore[1]);
+	// use pre-calculated permute map to shuffle our results to the leftmost lanes
+	j = mc;
+	xstore = _mm_shuffle_ps(xstore, xstore, 8);
+	// printf("xstore=[%x %x]\n", _mm_extract_epi32(xstore, 0), _mm_extract_epi32(xstore, 1));
+	switch(result_lanes) {
+		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
+		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);  //printf("shuffle\n");
+		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
+		default: break;
+	}
+	// printf("matches[]=[%x, %x], mc=%i, j - mc=%i\n", matches[0], matches[1], mc, j-mc);
+	// if (j-mc > 0 && tot++ > 20) { exit(1); }
+	return j - mc;
 }
 #elif __ARM_NEON__
 #include <arm_neon.h>
@@ -290,7 +295,7 @@ typedef struct {
  	item_t item[1024];
 } workqueue_t;
 
-#define THREADS 1
+#define THREADS 12
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
@@ -358,7 +363,7 @@ int main() {
 	wq.size = 1024;
 	wq.p = wq.last = 0;
 	pthread_mutex_init(&(wq.mut), NULL);
-	for (i=10; i<=36; i += 2) {
+	for (i=10; i<=32; i += 2) {
 		wq.done = 0;
 		max = (uint64_t)1 << (i - 1);
 		prefixes = malloc((size_t) 1 << (i/2));
