@@ -38,43 +38,52 @@ uint8_t add_table[] = {0, 1, 1, 2};
 int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
 	__m128i xi, xmask, xa, xb, xresult, xmatches, xmaskshift, xnotmask;
 	__m128i xstore;
+	uint64_t mask;
 	uint32_t result_lanes;
 	int j, ret;
 	xi = _mm_set1_epi64x(i);
 	xstore = xi = _mm_add_epi64(xi, offsets64);
-	printf("\n");
-	printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
+	// printf("\n");
+	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
 	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
-	xmask = xnotmask = _mm_set1_epi64x(UINT64_MAX);
-	xmask = _mm_sll_epi64(xmask, xi);
+	mask = UINT64_MAX << i;
+	xmask = _mm_insert_epi64(xmask, mask, 0);
+	mask = mask << 1;
+	xmask = _mm_insert_epi64(xmask, mask, 1);
+	xnotmask = _mm_set1_epi64x(UINT64_MAX);
 	xmask = _mm_andnot_si128(xmask, xnotmask);
-	printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
-	printf("xmask=[%llx, %llx]\n", xmask[0], xmask[1]);
+	// printf("xi=[%llx, %llx]\n", xi[0], xi[1]);
+	// printf("xmask=[%llx, %llx]\n", xmask[0], xmask[1]);
 	xa = xb = _mm_set1_epi64x(p.pattern);
-	printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
 	// mask out high bits on ya
 	xa = _mm_and_si128(xa, xmask);
-	printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
 	// shift yb right by yi then mask out high bits
 	xb = _mm_srl_epi64(xb, xi);
-	printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
 	xb = _mm_and_si128(xb, xmask);
-	printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
+	// printf("xa=[%llx, %llx] xb=[%llx, %llx]\n", xa[0], xa[1], xb[0], xb[1]);
 	// compare, then get result lane mask
 	xresult = _mm_cmpeq_epi64(xa, xb);
+	// printf("xresult=[%llx, %llx]\n", xresult[0], xresult[1]);
 	result_lanes = _mm_movemask_pd(xresult);
+	// printf("result_lanes=%i\n", result_lanes);
 	// we want to store the size of the bit patterns that result in euqals, so...
 	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
 	xstore = _mm_sll_epi64(xstore, xone64);
+	// printf("xstore=[%llx %llx]\n", xstore[0], xstore[1]);
 	// use pre-calculated permute map to shuffle our results to the leftmost lanes
 	j = mc;
-	xstore = _mm_shuffle_ps(xstore, xstore, 13);
+	xstore = _mm_shuffle_ps(xstore, xstore, 8);
+	// printf("xstore=[%x %x]\n", _mm_extract_epi32(xstore, 0), _mm_extract_epi32(xstore, 1));
 	switch(result_lanes) {
-		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore);
-		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);
-		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore);
+		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
+		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);  //printf("shuffle\n");
+		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
 		default: break;
 	}
+	// printf("matches[]=[%x, %x], mc=%i, j - mc=%i\n", matches[0], matches[1], mc, j-mc);
 	return j - mc;
 }
 #elif __AVX2__
