@@ -48,22 +48,32 @@ __m128i collapse_map[] = {
 	m128_init(0,1,2,3),  // 0b1111
 };
 
+// try doing a table instead of broadcast
+
+
 // store the topmost lane from src to dest, then permute src in [a,b,c,d] => [b,c,d,a] order (57 is the magic number for that)
-#define store_top_and_permute(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter]), src); src = _mm_permute_ps(src, 57);
+#define store_leftmost(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter]), src)
+#define permute_left(src)  src = _mm_permute_ps(src, 57)
 
 #define VECTOR_INCREMENT 4
 
-int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
-	__m256i yi, ymask, ya, yb, yresult, ymatches, ymaskshift, ynotmask;
-	__m128i xstore;
+int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
+	__m256i yi, ymask, ya, yb, yresult, ymatches, ymaskshift, ynotmask, yguard;
+	__m128i xstore, xpermute;
 	uint32_t result_lanes;
-	int j, ret;
+	int ret, j = mc;
 	// initialize yi to the value of i and add offset vector {0, 1, 2, 3} to replace 4 loops on i
 	// experimented with unrolling this loop, seems to make things worse on Zen 2.
 	// probably because the execution path is only 256-bit wide on Zen 2
 	// newer chips may yield better perf here.
 	yi = _mm256_set1_epi64x(i);
 	yi = _mm256_add_epi64(yi, offsets);
+	// generate mask to mask out any values of i that exceed max
+	yguard = _mm256_set1_epi64x(max);
+	yguard = _mm256_cmpgt_epi64(yguard, yi);
+	// reinitialize xstore to i and do offsets
+	xstore = _mm_set1_epi32(i);
+	xstore = _mm_add_epi32(xstore, offsets32);
 	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
 	ymask = ynotmask = _mm256_set1_epi64x(UINT64_MAX);
 	ymask = _mm256_sllv_epi64(ymask, yi);
@@ -75,27 +85,25 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
 	yb = _mm256_srlv_epi64(yb, yi);
 	yb = _mm256_and_si256(yb, ymask);
 	// compare, then get result lane mask
-	yresult = _mm256_cmpeq_epi64(ya, yb);
+	yresult = _mm256_and_si256(_mm256_cmpeq_epi64(ya, yb), yguard);
 	result_lanes = _mm256_movemask_pd(yresult);
+	// do table lookup for precomputed permute indices
+	xpermute = collapse_map[result_lanes];
 	// we want to store the size of the bit patterns that result in euqals, so...
-	// reinitialize xstore to i and do offsets
-	xstore = _mm_set1_epi32(i);
-	xstore = _mm_add_epi32(xstore, offsets32);
 	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
 	xstore = _mm_sllv_epi32(xstore, xone);
 	// use pre-calculated permute map to shuffle our results to the leftmost lanes
-	xstore = _mm_permutevar_ps(xstore, collapse_map[result_lanes]);
+	xstore = _mm_permutevar_ps(xstore, xpermute);
 	// then store to array.
-	j = mc;
 	// this is about a 3% speedup for the whole application vs an equivalent for loop ¯\_(ツ)_/¯
 	switch (add_table[result_lanes]) {
-		case 4: store_top_and_permute(xstore, matches, j++);
-		case 3: store_top_and_permute(xstore, matches, j++);
-		case 2: store_top_and_permute(xstore, matches, j++);
-		case 1: store_top_and_permute(xstore, matches, j++);
+		case 4: store_leftmost(xstore, matches, j++); permute_left(xstore);
+		case 3: store_leftmost(xstore, matches, j++); permute_left(xstore);
+		case 2: store_leftmost(xstore, matches, j++); permute_left(xstore);
+		case 1: store_leftmost(xstore, matches, j++);
 		default: break;
 	}
-	return add_table[result_lanes];
+	return j - mc;
 }
 #elif __SSE4_2__
 #include <immintrin.h>
@@ -115,7 +123,7 @@ uint8_t add_table[] = {0, 1, 1, 2};
 // # define store_top(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter], src);
 
 #define VECTOR_INCREMENT 2
-int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
+int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	__m128i xi, xmask, xa, xb, xresult, xmatches, xmaskshift, xnotmask;
 	__m128i xstore;
 	uint64_t mask, itemp;
@@ -181,8 +189,8 @@ uint64x2_t voffsets = {0, 1};
 uint64x2_t vone = {1, 1};
 uint64x2_t vtwo = {2, 2};
 
-inline int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
-	uint64x2_t vi, vold, vmask, va, vb, vresult, vguard;
+int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
+	uint64x2_t vi, vmask, va, vb, vresult, vguard;
 	int temp, residx = mc;
 	// we need the pattern length in vector form for later comparisons
 	const uint64x2_t vplength = vdupq_n_u64(p.length);
@@ -224,7 +232,7 @@ inline int vectorized_test_mask(int i, bitpat_t p, int mc, int matches[]) {
 }
 #else
 #define VECTOR_INCREMENT 1
-#define vectorized_test_mask scalar_test_mask
+#define vectorized_test_mask(a, b, c, d, e) scalar_test_mask(a, b, c, e)
 #endif
 
 int scalar_test_mask(int i, bitpat_t p, int mc, int matches[]) {
@@ -239,11 +247,12 @@ int scalar_test_mask(int i, bitpat_t p, int mc, int matches[]) {
 }
 
 int simd_test_for_match(bitpat_t p, int matches[]) {
-	int i, ret, min, mc = 0;
+	int i, ret, min, max, mc = 0;
 	uint64_t a, b;
 	min = i%4?i/4:(i/4)+1;
-	for (i=min; i<=p.length/2; i += VECTOR_INCREMENT) {
-		mc += vectorized_test_mask(i, p, mc, matches);
+	max = p.length/2+1;
+	for (i=min; i<=max; i += VECTOR_INCREMENT) {
+		mc += vectorized_test_mask(i, p, mc, max, matches);
 	}
 	return mc>2?2:mc;
 }
@@ -315,11 +324,12 @@ void shard(item_t item) {
 			t.pattern = ~t.pattern;
 			bitpat2str(t, pbuff);
 			printf("%s [%i %i]\n", pbuff, matches[0], matches[1]);
+			fflush(stdout);
 		}
 	}
 }
 
-#define POLL_INTERVAL 50
+#define POLL_INTERVAL 5
 
 int shard_wrap(workqueue_t *wq) {
 	int ret;
@@ -345,18 +355,20 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
+#define QUEUE_DEPTH 10
+
 int main() {
-	int i, status, mc, outstanding, thr, ret;
+	int i, k, status, mc, outstanding, thr, ret, shift;
 	uint8_t *prefixes;
 	uint64_t j, jmax, inc, max, mask;
 	pid_t cp;
-	pthread_t threads[1024];
+	pthread_t threads[1 << QUEUE_DEPTH];
 	workqueue_t wq;
 	item_t item;
-	wq.size = 1024;
+	wq.size = 1 << QUEUE_DEPTH;
 	wq.p = wq.last = 0;
 	pthread_mutex_init(&(wq.mut), NULL);
-	for (i=10; i<=32; i += 2) {
+	for (i = 10; i <= 32; i += 2) {
 		wq.done = 0;
 		max = (uint64_t)1 << (i - 1);
 		prefixes = malloc((size_t) 1 << (i/2));
@@ -395,5 +407,6 @@ int main() {
 			pthread_join(threads[thr], NULL);
 		}
 		free(prefixes);
+
 	}
 }
