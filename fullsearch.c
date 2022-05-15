@@ -286,6 +286,8 @@ int init_prefixes(int p2, uint8_t *prefixes) {
 	return 1;
 }
 
+#define QUEUE_DEPTH 12
+
 typedef struct {
 	uint64_t jmax;
 	uint64_t max;
@@ -300,11 +302,12 @@ typedef struct {
 	pthread_mutex_t mut;
 	int size;
 	int p, last;
+	int count;
 	int done;
- 	item_t item[1024];
+	item_t item[1 << QUEUE_DEPTH];
 } workqueue_t;
 
-#define THREADS 12
+#define THREADS 4
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
@@ -329,7 +332,7 @@ void shard(item_t item) {
 	}
 }
 
-#define POLL_INTERVAL 5
+#define POLL_INTERVAL 100
 
 int shard_wrap(workqueue_t *wq) {
 	int ret;
@@ -338,13 +341,14 @@ int shard_wrap(workqueue_t *wq) {
 		ret = pthread_mutex_lock(&(wq->mut));
 		if (ret) {
 			fprintf(stderr, "mutex problem\n");
-			return ret;
+			exit(1);
 		}
-		if (wq->last == wq->p) {
+		if (wq->count == 0) {
 			pthread_mutex_unlock(&(wq->mut));
 			usleep(POLL_INTERVAL);
 			continue;
 		}
+		wq->count--;
 		item = wq->item[wq->last++];
 		if (wq->last >= wq->size) {
 			wq->last = 0;
@@ -355,10 +359,8 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
-#define QUEUE_DEPTH 10
-
 int main() {
-	int i, k, status, mc, outstanding, thr, ret, shift;
+	int i, k, status, mc, outstanding, thr, ret, shift, curcount;
 	uint8_t *prefixes;
 	uint64_t j, jmax, inc, max, mask;
 	pid_t cp;
@@ -373,28 +375,39 @@ int main() {
 		max = (uint64_t)1 << (i - 1);
 		prefixes = malloc((size_t) 1 << (i/2));
 		init_prefixes(i/2, prefixes);
-		inc = i>=16?max>>8:max;
-		for (j=0; j<max;j+=inc) {
-			jmax = j + inc;
-			item.i = i; item.j = j; item.inc = inc; item.jmax = jmax; item.max = max; item.prefixes = prefixes;
-			wq.item[wq.p++] = item;
-			if (wq.p >= wq.size) {
-				wq.p = 0;
-			}
-		}
+		inc = i >= 16 ? max >> (i / 4) : max;
 		for (thr = 0; thr < THREADS; thr++) {
 			ret = pthread_create(&(threads[thr]), NULL, (void *(*) (void *)) shard_wrap, &wq);
-			if (ret) {
-				fprintf(stderr, "thread problem\n");
-				return 1;
+			if (ret) return 1;
+		}
+		for (j = 0; j < max;) {
+			while (1) {
+				ret = pthread_mutex_lock(&wq.mut);
+				if (ret) {
+					fprintf(stderr, "thread problem\n");
+					return 1;
+				}
+				if (wq.count < (1 << (QUEUE_DEPTH - 1))) {
+					break;
+				}
+				pthread_mutex_unlock(&wq.mut);
+				usleep(POLL_INTERVAL);
 			}
+			for (k = 0; j < max && k < (1 << (QUEUE_DEPTH - 2)); j += inc, k++) {
+				jmax = j + inc;
+				item.i = i; item.j = j; item.inc = inc; item.jmax = jmax; item.max = max; item.prefixes = prefixes;
+				wq.item[wq.p++] = item;
+				wq.count++;
+				wq.p = wq.p < wq.size ? wq.p : 0;
+			}
+			pthread_mutex_unlock(&wq.mut);
 		}
 		while (1) {
 			usleep(POLL_INTERVAL);
 			ret = pthread_mutex_lock(&wq.mut);
 			if (ret) {
-				fprintf(stderr, "mutex problem ret=%i\n", ret);
-				return ret;
+				fprintf(stderr, "mutex problem\n");
+				return 1;
 			}
 			if (wq.p == wq.last) {
 				wq.done = 1;
@@ -407,6 +420,6 @@ int main() {
 			pthread_join(threads[thr], NULL);
 		}
 		free(prefixes);
-
 	}
+	printf("done\n");
 }
