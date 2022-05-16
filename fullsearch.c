@@ -440,6 +440,5 @@ int main() {
 	for (thr = 0; thr < THREADS; thr++) {
 		pthread_join(threads[thr], NULL);
 	}
-	free(prefixes);
 	printf("done\n");
 }
