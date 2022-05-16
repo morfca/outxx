@@ -286,7 +286,7 @@ int init_prefixes(int p2, uint8_t *prefixes) {
 	return 1;
 }
 
-#define QUEUE_DEPTH 12
+#define QUEUE_DEPTH 16
 
 typedef struct {
 	int refcount;
@@ -312,7 +312,7 @@ typedef struct {
 	item_t item[1 << QUEUE_DEPTH];
 } workqueue_t;
 
-#define THREADS 12
+#define THREADS 48
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
@@ -375,7 +375,7 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
-#define PLIMIT 48
+#define PLIMIT 56
 
 int main() {
 	int i, k, status, mc, outstanding, thr, ret, shift, curcount;
@@ -410,7 +410,7 @@ int main() {
 					break;
 				}
 				pthread_mutex_unlock(&wq.mut);
-				usleep(POLL_INTERVAL * 100);
+				usleep(POLL_INTERVAL * 5);
 			}
 			for (k = 0; (j < max) && (k < (1 << (QUEUE_DEPTH - 2))); j += inc, k++) {
 				jmax = j + inc;
