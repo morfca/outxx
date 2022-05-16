@@ -410,7 +410,7 @@ int main() {
 					break;
 				}
 				pthread_mutex_unlock(&wq.mut);
-				usleep(POLL_INTERVAL);
+				usleep(POLL_INTERVAL * 100);
 			}
 			for (k = 0; (j < max) && (k < (1 << (QUEUE_DEPTH - 2))); j += inc, k++) {
 				jmax = j + inc;
