@@ -198,6 +198,8 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	// increment the right lane by 1
 	vi = vdupq_n_u64(i);
 	vi = vaddq_u64(vi, voffsets);
+	// compute guard mask
+	vguard = vcleq_u64(vi, vdupq_n_u64(max));
 	// create bitmask of i lower bits from vi lanes by initializing to all 1, shifting left by vi, then inverting
 	vmask = vshlq_u64(allmax, vi);
 	vmask = vmvnq_u8(vmask);
@@ -210,9 +212,9 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	vb = vandq_u64(vb, vmask);
 	// do comparison
 	vresult = vceqq_u64(va, vb);
+	vresult = vandq_u64(vresult, vguard);
 	// multiply by two to get the bit pattern that doubles rather than the shift size for the compare
 	// use a bit shift because we know we are multiplying by 2 and the latency on bit shifts is less
-	vold = vi;
 	vi = vshlq_u64(vi, vone);
 	// generate a bitmask using less than equal comparator to mask out values that go over the pattern length
 	// vguard = vcleq_u64(vi, vplength);
@@ -312,7 +314,7 @@ typedef struct {
 	item_t item[1 << QUEUE_DEPTH];
 } workqueue_t;
 
-#define THREADS 48
+#define THREADS 8
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
@@ -375,7 +377,7 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
-#define PLIMIT 56
+#define PLIMIT 32
 
 int main() {
 	int i, k, status, mc, outstanding, thr, ret, shift, curcount;
