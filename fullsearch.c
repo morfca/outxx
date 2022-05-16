@@ -182,22 +182,24 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 }
 #elif __ARM_NEON__
 #include <arm_neon.h>
-#define VECTOR_INCREMENT 2
-
+#define VECTOR_INCREMENT 4
 uint64x2_t allmax = {UINT64_MAX, UINT64_MAX};
-uint64x2_t voffsets = {0, 1};
+uint64x2_t voffsets01 = {0, 1};
+uint64x2_t voffsets23 = {2, 3};
 uint64x2_t vone = {1, 1};
 uint64x2_t vtwo = {2, 2};
 
+#if VECTOR_INCREMENT == 2
 int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	uint64x2_t vi, vmask, va, vb, vresult, vguard;
-	int temp, residx = mc;
+	int temp, j = mc, unroll = 0, resmask = 0;
+	uint64_t res1, res2;
 	// we need the pattern length in vector form for later comparisons
 	const uint64x2_t vplength = vdupq_n_u64(p.length);
 	// initialize both lanes to i
 	// increment the right lane by 1
-	vi = vdupq_n_u64(i);
-	vi = vaddq_u64(vi, voffsets);
+	vi = vdupq_n_u64(i + unroll);
+	vi = vaddq_u64(vi, voffsets01);
 	// compute guard mask
 	vguard = vcleq_u64(vi, vdupq_n_u64(max));
 	// create bitmask of i lower bits from vi lanes by initializing to all 1, shifting left by vi, then inverting
@@ -215,23 +217,73 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	vresult = vandq_u64(vresult, vguard);
 	// multiply by two to get the bit pattern that doubles rather than the shift size for the compare
 	// use a bit shift because we know we are multiplying by 2 and the latency on bit shifts is less
-	vi = vshlq_u64(vi, vone);
-	// generate a bitmask using less than equal comparator to mask out values that go over the pattern length
-	// vguard = vcleq_u64(vi, vplength);
-	// store each lane if the compare lane shows a result
-	// this is probably why it's barely faster than scalar but I can't figure out a better way to do this
-	// vresult = vandq_u64(vresult, vguard);
-	uint64_t res1 = vgetq_lane_u64(vresult, 0);
-	uint64_t res2 = vgetq_lane_u64(vresult, 1);
-	int resmsk = (res1 & 1) | ((res2 & 1) << 1);
-	switch (resmsk) {
-		case 3: matches[residx++] = (int) vgetq_lane_u64(vi, 0);
-		case 2: vi = vextq_u64(vi, vi, 1);
-		case 1: matches[residx++] = (int) vgetq_lane_u64(vi, 0);
-		default: break;
+	// vi = vshlq_u64(vi, vone);
+	// get lane sign bits (comparisons set all bits in a lane)
+	vresult = vshlq_u64(vandq_u64(vresult, vone), voffsets01);
+	// printf("vresult=[%llx, %llx]\n", vresult[0], vresult[1]);
+	resmask = vpaddd_u64(vresult);
+	for (i <<= 1; resmask; resmask >>= 1, i += 2) {
+		if (resmask & 1) matches[j++] = i;
 	}
-	return residx - mc;
+	return j - mc;
 }
+#endif
+
+#if VECTOR_INCREMENT == 4
+int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
+	uint64x2_t vi1, vmask1, va1, vb1, vresult1, vguard1;
+	uint64x2_t vi2, vmask2, va2, vb2, vresult2, vguard2;
+	int temp, j = mc, resmask = 0;
+	uint64_t res;
+	// we need the pattern length in vector form for later comparisons
+	const uint64x2_t vplength = vdupq_n_u64(p.length);
+	// initialize both lanes to i
+	// increment the right lane by 1
+	vi1 = vdupq_n_u64(i);
+	vi1 = vaddq_u64(vi1, voffsets01);
+	vi2 = vdupq_n_u64(i);
+	vi2 = vaddq_u64(vi2, voffsets23);
+	// compute guard mask
+	vguard1 = vcleq_u64(vi1, vdupq_n_u64(max));
+	vguard2 = vcleq_u64(vi2, vdupq_n_u64(max));
+	// create bitmask of i lower bits from vi lanes by initializing to all 1,
+	// shifting left by vi, then inverting
+	vmask1 = vshlq_u64(allmax, vi1);
+	vmask1 = vmvnq_u8(vmask1);
+	vmask2 = vshlq_u64(allmax, vi2);
+	vmask2 = vmvnq_u8(vmask2);
+	// initialize a and b from pattern
+	va1 = vb1 = vdupq_n_u64(p.pattern);
+	va1 = vandq_u64(va1, vmask1);
+	va2 = vb2 = vdupq_n_u64(p.pattern);
+	va2 = vandq_u64(va2, vmask2);
+	// shift vb left by -vi. we negate vi by bitwise not plus one
+	vb1 = vshlq_u64(vb1, vaddq_u64(vmvnq_u8(vi1), vone));
+	vb2 = vshlq_u64(vb2, vaddq_u64(vmvnq_u8(vi2), vone));
+	// apply bitmask to vb
+	vb1 = vandq_u64(vb1, vmask1);
+	vb2 = vandq_u64(vb2, vmask2);
+	// do comparison
+	vresult1 = vceqq_u64(va1, vb1);
+	vresult1 = vandq_u64(vresult1, vguard1);
+	vresult2 = vceqq_u64(va2, vb2);
+	vresult2 = vandq_u64(vresult2, vguard2);
+	// multiply by two to get the bit pattern that doubles rather than the shift size for the compare
+	// use a bit shift because we know we are multiplying by 2 and the latency on bit shifts is less
+	// vi = vshlq_u64(vi, vone);
+	// get lane sign bits (comparisons set all bits in a lane)
+	vresult1 = vshlq_u64(vandq_u64(vresult1, vone), voffsets01);
+	vresult2 = vshlq_u64(vandq_u64(vresult2, vone), voffsets23);
+	vresult1 = vaddq_u64(vresult1, vresult2);
+	resmask = vpaddd_u64(vresult1);
+	// if (resmask) { printf("%i\n", resmask); }
+	for (i <<= 1; resmask; resmask >>= 1, i += 2) {
+		if (resmask & 1) matches[j++] = i;
+	}
+	return j - mc;
+}
+#endif
+
 #else
 #define VECTOR_INCREMENT 1
 #define vectorized_test_mask(a, b, c, d, e) scalar_test_mask(a, b, c, e)
@@ -314,7 +366,7 @@ typedef struct {
 	item_t item[1 << QUEUE_DEPTH];
 } workqueue_t;
 
-#define THREADS 8
+#define THREADS 4
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
@@ -377,7 +429,7 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
-#define PLIMIT 32
+#define PLIMIT 36
 
 int main() {
 	int i, k, status, mc, outstanding, thr, ret, shift, curcount;
