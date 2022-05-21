@@ -117,51 +117,81 @@ __m128i offsets32 = m128_init32(0, 1, 2, 3);
 __m128i offsets64 = m128_init64(0, 1);
 __m128i xone32 = m128_init32(1,1,1,1);
 __m128i xone64 = m128_init64(1,1);
+__m128i xtwo64 = m128_init64(2,2);
 
 uint8_t add_table[] = {0, 1, 1, 2};
 
-// # define store_top(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter], src);
+#define VECTOR_INCREMENT 4
 
-#define VECTOR_INCREMENT 2
 int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
-	__m128i xi, xmask, xa, xb, xresult, xmatches, xmaskshift, xnotmask;
-	__m128i xstore;
+	__m128i xi1, xmask1, xa1, xb1, xresult1, xmatches1, xmaskshift1, xstore1, xguard1;
+	__m128i xi2, xmask2, xa2, xb2, xresult2, xmatches2, xmaskshift2, xstore2, xguard2;
+	__m128i xnotmask, xmax;
 	uint64_t mask, itemp;
 	uint32_t result_lanes;
 	int j, ret;
-	xi = _mm_set1_epi64x(i);
-	xstore = xi = _mm_add_epi64(xi, offsets64);
+	xmax = _mm_set1_epi64x(max);
+	xi1 = _mm_set1_epi64x(i);
+	xstore1 = xi1 = _mm_add_epi64(xi1, offsets64);
+	xstore2 = xi2 = _mm_add_epi64(xi1, xtwo64);
+	// AFAICT comparing something to itself is the fastest way to set all bits
+	xnotmask = _mm_cmpeq_epi64(xi1, xi1);
+	// use the compare to mask out out of bounds results
+	// SSE doesn't have a cmple so we have to cmpgt then bitwise not
+	xguard1 = _mm_andnot_si128(_mm_cmpgt_epi64(xi1, xmax), xnotmask);
+	xguard2 = _mm_andnot_si128(_mm_cmpgt_epi64(xi2, xmax), xnotmask);
 	// set a bitmask of the lower xi bits on ymask by initializing to all 1's, shfting left, then bitwise not
 	mask = UINT64_MAX << i;
 	// unfortunately no var shift in SSE :(, have to do the shift in scalar space
-	xmask = _mm_insert_epi64(xmask, mask, 0);
+	xmask1 = _mm_insert_epi64(xmask1, mask, 0);
 	mask = mask << 1;
-	xmask = _mm_insert_epi64(xmask, mask, 1);
-	// AFAICT comparing something to itself is the fastest way to set all bits
-	xnotmask = _mm_cmpeq_epi64(xi, xi);
-	xmask = _mm_andnot_si128(xmask, xnotmask);
-	xa = _mm_set1_epi64x(p.pattern);
+	xmask1 = _mm_insert_epi64(xmask1, mask, 1);
+	mask = mask << 1;
+	xmask2 = _mm_insert_epi64(xmask2, mask, 0);
+	mask = mask << 1;
+	xmask2 = _mm_insert_epi64(xmask2, mask, 1);
+	xmask1 = _mm_andnot_si128(xmask1, xnotmask);
+	xmask2 = _mm_andnot_si128(xmask2, xnotmask);
+	xa1 = xa2 = _mm_set1_epi64x(p.pattern);
 	// mask out high bits on xa
-	xa = _mm_and_si128(xa, xmask);
+	xa1 = _mm_and_si128(xa1, xmask1);
+	xa2 = _mm_and_si128(xa2, xmask2);
 	// shift xb right by xi then mask out high bits
 	itemp = p.pattern >> i;
-	xb = _mm_insert_epi64(xb, itemp, 0);
+	xb1 = _mm_insert_epi64(xb1, itemp, 0);
 	itemp = itemp >> 1;
-	xb = _mm_insert_epi64(xb, itemp, 1);
-	xb = _mm_and_si128(xb, xmask);
+	xb1 = _mm_insert_epi64(xb1, itemp, 1);
+	itemp = itemp >> 1;
+	xb2 = _mm_insert_epi64(xb2, itemp, 0);
+	itemp = itemp >> 1;
+	xb2 = _mm_insert_epi64(xb2, itemp, 1);
+	xb1 = _mm_and_si128(xb1, xmask1);
+	xb2 = _mm_and_si128(xb2, xmask2);
 	// compare, then get result lane mask
-	xresult = _mm_cmpeq_epi64(xa, xb);
-	result_lanes = _mm_movemask_pd(xresult);
+	xresult1 = _mm_cmpeq_epi64(xa1, xb1);
+	xresult1 = _mm_and_si128(xresult1, xguard1);
+	xresult2 = _mm_cmpeq_epi64(xa2, xb2);
+	xresult2 = _mm_and_si128(xresult2, xguard2);
+	result_lanes = _mm_movemask_pd(xresult1);
 	// we want to store the size of the bit patterns that result in equals, so...
 	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
-	xstore = _mm_sll_epi64(xstore, xone64);
-	// use pre-calculated permute map to shuffle our results to the leftmost lanes
+	xstore1 = _mm_sll_epi64(xstore1, xone64);
 	j = mc;
-	xstore = _mm_shuffle_ps(xstore, xstore, 8);
+	// use pre-calculated permute map to shuffle our results to the leftmost lanes
+	xstore1 = _mm_shuffle_ps(xstore1, xstore1, 8);
 	switch(result_lanes) {
-		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore);
-		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);
-		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore);
+		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore1);
+		case 2: xstore1 = _mm_shuffle_ps(xstore1, xstore1, 1);
+		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore1);
+		case 0: {};
+	}
+	result_lanes = _mm_movemask_pd(xresult2);
+	xstore2 = _mm_sll_epi64(xstore2, xone64);
+	xstore2 = _mm_shuffle_ps(xstore2, xstore2, 8);
+	switch(result_lanes) {
+		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore2);
+		case 2: xstore2 = _mm_shuffle_ps(xstore2, xstore2, 1);
+		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore2);
 		case 0: {};
 	}
 	return j - mc;
@@ -314,7 +344,11 @@ typedef struct {
 	item_t item[1 << QUEUE_DEPTH];
 } workqueue_t;
 
+#ifndef DEBUG
 #define THREADS 4
+#else
+#define THREADS 1
+#endif
 
 void shard(item_t item) {
 	int mc, mc2, matches[32+8], matches2[32+8];  // extra space in case of overflow from vector registers
