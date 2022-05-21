@@ -74,7 +74,7 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	// reinitialize xstore to i and do offsets
 	xstore = _mm_set1_epi32(i);
 	xstore = _mm_add_epi32(xstore, offsets32);
-	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
+	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then bitwise not
 	ymask = ynotmask = _mm256_set1_epi64x(UINT64_MAX);
 	ymask = _mm256_sllv_epi64(ymask, yi);
 	ymask = _mm256_andnot_si256(ymask, ynotmask);
@@ -101,7 +101,7 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 		case 3: store_leftmost(xstore, matches, j++); permute_left(xstore);
 		case 2: store_leftmost(xstore, matches, j++); permute_left(xstore);
 		case 1: store_leftmost(xstore, matches, j++);
-		default: break;
+		case 0: {};
 	}
 	return j - mc;
 }
@@ -131,12 +131,14 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	int j, ret;
 	xi = _mm_set1_epi64x(i);
 	xstore = xi = _mm_add_epi64(xi, offsets64);
-	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then noting
+	// set a bitmask of the lower xi bits on ymask by initializing to all 1's, shfting left, then bitwise not
 	mask = UINT64_MAX << i;
+	// unfortunately no var shift in SSE :(, have to do the shift in scalar space
 	xmask = _mm_insert_epi64(xmask, mask, 0);
 	mask = mask << 1;
 	xmask = _mm_insert_epi64(xmask, mask, 1);
-	xnotmask = _mm_set1_epi64x(UINT64_MAX);
+	// AFAICT comparing something to itself is the fastest way to set all bits
+	xnotmask = _mm_cmpeq_epi64(xi, xi);
 	xmask = _mm_andnot_si128(xmask, xnotmask);
 	xa = _mm_set1_epi64x(p.pattern);
 	// mask out high bits on xa
@@ -150,17 +152,17 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	// compare, then get result lane mask
 	xresult = _mm_cmpeq_epi64(xa, xb);
 	result_lanes = _mm_movemask_pd(xresult);
-	// we want to store the size of the bit patterns that result in euqals, so...
+	// we want to store the size of the bit patterns that result in equals, so...
 	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
 	xstore = _mm_sll_epi64(xstore, xone64);
 	// use pre-calculated permute map to shuffle our results to the leftmost lanes
 	j = mc;
 	xstore = _mm_shuffle_ps(xstore, xstore, 8);
 	switch(result_lanes) {
-		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
-		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);  //printf("shuffle\n");
-		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore); //printf("store\n");
-		default: break;
+		case 3: _mm_storeu_si32((void *)&(matches[j++]), xstore);
+		case 2: xstore = _mm_shuffle_ps(xstore, xstore, 1);
+		case 1: _mm_storeu_si32((void *)&(matches[j++]), xstore);
+		case 0: {};
 	}
 	return j - mc;
 }
@@ -375,7 +377,7 @@ int shard_wrap(workqueue_t *wq) {
 	return 0;
 }
 
-#define PLIMIT 36
+#define PLIMIT 32
 
 int main() {
 	int i, k, status, mc, outstanding, thr, ret, shift, curcount;
