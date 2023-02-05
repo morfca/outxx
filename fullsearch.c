@@ -75,7 +75,7 @@ int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
 	xstore = _mm_set1_epi32(i);
 	xstore = _mm_add_epi32(xstore, offsets32);
 	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then bitwise not
-	ymask = ynotmask = _mm256_set1_epi64x(UINT64_MAX);
+	ymask = ynotmask = _mm256_cmpeq_epi64(yi, yi);
 	ymask = _mm256_sllv_epi64(ymask, yi);
 	ymask = _mm256_andnot_si256(ymask, ynotmask);
 	ya = yb = _mm256_set1_epi64x(p.pattern);
@@ -319,7 +319,7 @@ typedef struct {
 } workqueue_t;
 
 #ifndef DEBUG
-#define THREADS 4
+#define THREADS 12
 #else
 #define THREADS 1
 #endif
