@@ -16,7 +16,86 @@ bitpat_t int2bitpat(uint64_t v, int l) {
 	return (bitpat_t){~0 >> (64 - l) & v, l};
 }
 
-#ifdef __AVX2__
+#ifdef __AVX512__
+#include <immintrin.h>
+#define m128_init(c1, c2, c3, c4) {(uint64_t)c1 + ((uint64_t)c2 << 32), (uint64_t)c3 + ((uint64_t)c4 << 32)}
+
+__m256i offsets = { (uint64_t)0, (uint64_t)1, (uint64_t)2, (uint64_t)3 };
+__m128i offsets32 = m128_init(0, 1, 2, 3);
+__m128i xone = m128_init(1,1,1,1);
+
+uint8_t add_table[] = {0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4};
+
+// permute values that consolidate results in leftmost lanes
+// we precompute this so we can quickly convert the result from cmpeq to an argument for permutevar
+__m128i collapse_map[] = {
+	m128_init(0,0,0,0),  // 0b0000
+	m128_init(0,0,0,0),  // 0b0001
+	m128_init(1,0,0,0),  // 0b0010
+	m128_init(0,1,0,0),  // 0b0011
+	m128_init(2,0,0,0),  // 0b0100
+	m128_init(0,2,0,0),  // 0b0101
+	m128_init(1,2,0,0),  // 0b0110
+	m128_init(0,1,2,0),  // 0b0111
+	m128_init(3,0,0,0),  // 0b1000
+	m128_init(0,3,0,0),  // 0b1001
+	m128_init(1,3,0,0),  // 0b1010
+	m128_init(0,1,3,0),  // 0b1011
+	m128_init(2,3,0,0),  // 0b1100
+	m128_init(0,2,3,0),  // 0b1101
+	m128_init(1,2,3,0),  // 0b1110
+	m128_init(0,1,2,3),  // 0b1111
+};
+
+// try doing a table instead of broadcast
+
+
+// store the topmost lane from src to dest, then permute src in [a,b,c,d] => [b,c,d,a] order (57 is the magic number for that)
+#define store_leftmost(src, dest, counter) _mm_storeu_si32((void *)&(dest[counter]), src)
+#define permute_left(src)  src = _mm_permute_ps(src, 57)
+
+#define VECTOR_INCREMENT 4
+
+int vectorized_test_mask(int i, bitpat_t p, int mc, int max, int matches[]) {
+	__m256i yi, ymask, ya, yb, yresult, ymatches, ymaskshift, ynotmask, yguard;
+	__m128i xstore, xpermute;
+	__mmask8 = result_lanes;
+	int ret, rescnt, j = mc;
+	// initialize yi to the value of i and add offset vector {0, 1, 2, 3} to replace 4 loops on i
+	// experimented with unrolling this loop, seems to make things worse on Zen 2.
+	// probably because the execution path is only 256-bit wide on Zen 2
+	// newer chips may yield better perf here.
+	yi = _mm256_set1_epi64x(i);
+	yi = _mm256_add_epi64(yi, offsets);
+	// generate mask to mask out any values of i that exceed max
+	yguard = _mm256_set1_epi64x(max);
+	yguard = _mm256_cmpgt_epi64(yguard, yi);
+	// reinitialize xstore to i and do offsets
+	xstore = _mm_set1_epi32(i);
+	xstore = _mm_add_epi32(xstore, offsets32);
+	// set a bitmask of the lower yi bits on ymask by initializing to all 1's, shfting left, then bitwise not
+	ymask = ynotmask = _mm256_cmpeq_epi64(yi, yi);
+	ymask = _mm256_sllv_epi64(ymask, yi);
+	ymask = _mm256_andnot_si256(ymask, ynotmask);
+	ya = yb = _mm256_set1_epi64x(p.pattern);
+	// mask out high bits on ya
+	ya = _mm256_and_si256(ya, ymask);
+	// shift yb right by yi then mask out high bits
+	yb = _mm256_srlv_epi64(yb, yi);
+	yb = _mm256_and_si256(yb, ymask);
+	// compare, then get result lane mask
+	yresult = _mm256_and_si256(_mm256_cmpeq_epi64(ya, yb), yguard);
+	result_lanes = _mm256_movemask_pd(yresult);
+	// we want to store the size of the bit patterns that result in euqals, so...
+	// multiply by 2 to get the bit pattern that doubles rather than the shift size for the compare
+	xstore = _mm_sllv_epi32(xstore, xone);
+	// compress active lanes to leftmost
+	xstore = _mm_permutevar_ps(xstore, result_lanes, xstore);
+	// then store to array.
+	_mm_mask_compressstoreu_epi64(&(matches[j]), result_lanes, xstore);
+	return _mm_popcnt_u32(result_lanes);
+}
+#elif __AVX2__
 #include <immintrin.h>
 #define m128_init(c1, c2, c3, c4) {(uint64_t)c1 + ((uint64_t)c2 << 32), (uint64_t)c3 + ((uint64_t)c4 << 32)}
 #define m128_unpack(x) (int[4]){x[0]&0xFFFFFFFF, x[0]>>32, x[1]&0xFFFFFFFF, x[1]>>32}
